@@ -7,7 +7,8 @@ from typing import Optional
 import customtkinter as ctk
 
 from clicker_core import AutoClicker, check_accessibility_permission, is_screen_locked, get_window_info_at
-from native_input import NativeHotkeyPoller, NativeMouseCapturePoller
+from native_input import NativeHotkeyPoller
+from overlay_capture import ScreenCaptureOverlay
 
 # 设置 CustomTkinter 外观
 ctk.set_appearance_mode("System")  # 跟随系统深色/浅色模式
@@ -26,8 +27,7 @@ class ModernClickerApp(ctk.CTk):
         self.attributes("-topmost", True)
 
         self.clicker = AutoClicker(log_callback=self._append_log)
-        self.mouse_capture = NativeMouseCapturePoller(self, on_click_callback=self._on_mouse_capture_click)
-        self.captured_points = []
+        self.overlay_capture = None
 
         self._create_widgets()
         self._setup_hotkeys()
@@ -70,7 +70,7 @@ class ModernClickerApp(ctk.CTk):
 
         hint_lbl = ctk.CTkLabel(
             header_frame,
-            text="快捷键：[F8] 屏幕取点  |  [F9] 开始执行  |  [Esc] 完成本轮ABB后停止",
+            text="快捷键：[F8] 屏幕取点  |  [F9] 开始执行  |  [Esc] 停止/取消",
             font=ctk.CTkFont(size=11),
             text_color="gray"
         )
@@ -447,7 +447,6 @@ class ModernClickerApp(ctk.CTk):
             pass
 
     def _setup_hotkeys(self):
-        # 1. macOS 原生主线程安全轮询热键监视器 (0 崩溃，无 GIL 冲突)
         self.hotkey_poller = NativeHotkeyPoller(
             self,
             on_f8=self.on_btn_capture,
@@ -455,59 +454,61 @@ class ModernClickerApp(ctk.CTk):
             on_esc=self.on_btn_stop
         )
         
-        # 2. Tkinter 窗口内本地按键绑定双重保险
         self.bind_all("<F8>", lambda e: self.on_btn_capture())
         self.bind_all("<F9>", lambda e: self.on_btn_run())
         self.bind_all("<Escape>", lambda e: self.on_btn_stop())
 
     def on_btn_capture(self):
-        if self.mouse_capture.is_active:
+        """开启全屏准星取点模式"""
+        if self.overlay_capture is not None:
             return
-        self.captured_points.clear()
-        self.btn_capture.configure(text="🎯 请在屏幕上点击 A 点...", state="disabled")
-        self._append_log("🎯 [取点模式开启] 请在屏幕目标位置点击左键取【A 点】...")
-        self.mouse_capture.start()
 
-    def _on_mouse_capture_click(self, x: int, y: int) -> bool:
-        """原生鼠标点击捕获回调（在主线程定时器中执行）"""
-        self.captured_points.append((x, y))
-        if len(self.captured_points) == 1:
-            self.clicker.point_a = (x, y)
+        self.btn_capture.configure(text="🎯 正在全屏取点中...", state="disabled")
+        self._append_log("🎯 [取点模式开启] 请在全屏十字准星遮罩上依次点击【A 点】与【B 点】 (按 Esc 取消)...")
+
+        def on_finish(pt_a, pt_b):
+            self.overlay_capture = None
+            self.clicker.point_a = pt_a
+            self.clicker.point_b = pt_b
+
             self.entry_ax.delete(0, "end")
-            self.entry_ax.insert(0, str(x))
+            self.entry_ax.insert(0, str(pt_a[0]))
             self.entry_ay.delete(0, "end")
-            self.entry_ay.insert(0, str(y))
-            self.lbl_status_a.configure(text="✅ 已更新", text_color="#2E7D32")
+            self.entry_ay.insert(0, str(pt_a[1]))
+            self.lbl_status_a.configure(text="✅ 已就绪", text_color="#2E7D32")
 
-            win_info = get_window_info_at(x, y)
+            self.entry_bx.delete(0, "end")
+            self.entry_bx.insert(0, str(pt_b[0]))
+            self.entry_by.delete(0, "end")
+            self.entry_by.insert(0, str(pt_b[1]))
+            self.lbl_status_b.configure(text="✅ 已就绪", text_color="#2E7D32")
+
+            win_info = get_window_info_at(pt_a[0], pt_a[1])
             if win_info:
                 self.clicker.target_app_name = win_info['app_name']
                 self.clicker.target_pid = win_info['pid']
                 self.lbl_target_app.configure(
                     text=f"🏷️ 目标应用: {self.clicker.target_app_name} (PID: {self.clicker.target_pid or 'N/A'})"
                 )
-                self._append_log(f"✅ 已记录 A 点: ({x}, {y}) (所属应用: 🏷️ {self.clicker.target_app_name})")
+                self._append_log(f"✅ 已记录 A 点: {pt_a} (所属应用: 🏷️ {self.clicker.target_app_name})")
             else:
-                self._append_log(f"✅ 已记录 A 点: ({x}, {y})")
+                self._append_log(f"✅ 已记录 A 点: {pt_a}")
 
-            self.btn_capture.configure(text="🎯 请在屏幕上点击 B 点...")
-            self._append_log("🎯 请在屏幕下一个目标位置点击左键取【B 点】...")
-            return True  # 继续捕获 B 点
-
-        elif len(self.captured_points) == 2:
-            self.clicker.point_b = (x, y)
-            self.entry_bx.delete(0, "end")
-            self.entry_bx.insert(0, str(x))
-            self.entry_by.delete(0, "end")
-            self.entry_by.insert(0, str(y))
-            self.lbl_status_b.configure(text="✅ 已更新", text_color="#2E7D32")
-            self._append_log(f"✅ 已记录 B 点: ({x}, {y})")
-            self._append_log("🎉 A/B 两点采集完毕，配置已自动保存！")
+            self._append_log(f"✅ 已记录 B 点: {pt_b}")
+            self._append_log("🎉 A/B 两点取点完成并自动保存！")
             self.clicker.persist_current_config()
             self.btn_capture.configure(text="① 重新取点 (F8)", state="normal")
-            return False  # 停止捕获
 
-        return False
+        def on_cancel():
+            self.overlay_capture = None
+            self.btn_capture.configure(text="① 屏幕取点 (F8)", state="normal")
+            self._append_log("🛑 已取消屏幕取点。")
+
+        self.overlay_capture = ScreenCaptureOverlay(
+            parent_app=self,
+            on_finish_callback=on_finish,
+            on_cancel_callback=on_cancel
+        )
 
     def on_btn_run(self):
         self._on_coords_manual_change()
@@ -531,10 +532,8 @@ class ModernClickerApp(ctk.CTk):
         self.clicker.start_execution(on_complete=on_complete)
 
     def on_btn_stop(self):
-        if self.mouse_capture.is_active:
-            self.mouse_capture.stop()
-            self.btn_capture.configure(text="① 屏幕取点 (F8)", state="normal")
-            self._append_log("🛑 取点已取消。")
+        if self.overlay_capture is not None:
+            self.overlay_capture.cancel()
             return
 
         if self.clicker._is_running:
