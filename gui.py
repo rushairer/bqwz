@@ -7,7 +7,7 @@ from typing import Optional
 import customtkinter as ctk
 
 from clicker_core import AutoClicker, check_accessibility_permission, is_screen_locked, get_window_info_at
-from native_input import NativeHotkeyPoller
+from native_input import GlobalHotkeyListener
 from overlay_capture import ScreenCaptureOverlay
 
 # 设置 CustomTkinter 外观
@@ -70,7 +70,7 @@ class ModernClickerApp(ctk.CTk):
 
         hint_lbl = ctk.CTkLabel(
             header_frame,
-            text="快捷键：[F8] 屏幕取点  |  [F9] 开始执行  |  [Esc] 停止/取消",
+            text="全局快捷键 (全局有效)：[F8] 屏幕取点  |  [F9] 开始执行  |  [Esc] 停止",
             font=ctk.CTkFont(size=11),
             text_color="gray"
         )
@@ -447,13 +447,16 @@ class ModernClickerApp(ctk.CTk):
             pass
 
     def _setup_hotkeys(self):
-        self.hotkey_poller = NativeHotkeyPoller(
-            self,
+        # 1. macOS 系统级全局底层热键监听器 (焦点在任何应用/全屏时均瞬间触发)
+        self.hotkey_listener = GlobalHotkeyListener(
+            tk_app=self,
             on_f8=self.on_btn_capture,
             on_f9=self.on_btn_run,
             on_esc=self.on_btn_stop
         )
+        self.hotkey_listener.start()
         
+        # 2. 本地窗口绑定双保险
         self.bind_all("<F8>", lambda e: self.on_btn_capture())
         self.bind_all("<F9>", lambda e: self.on_btn_run())
         self.bind_all("<Escape>", lambda e: self.on_btn_stop())
