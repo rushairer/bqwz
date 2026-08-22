@@ -1,8 +1,23 @@
 import json
 import os
+import sys
 from typing import Dict, Any
 
-CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
+def get_config_path() -> str:
+    """
+    获取配置文件的存放路径。
+    如果是打包后的 macOS .app (frozen)，优先存放在 ~/Library/Application Support/AutoClicker/config.json
+    如果是脚本运行，优先存放在本地工作目录，如不可写则存放在 Application Support。
+    """
+    if getattr(sys, 'frozen', False):
+        app_support = os.path.expanduser("~/Library/Application Support/AutoClicker")
+        os.makedirs(app_support, exist_ok=True)
+        return os.path.join(app_support, "config.json")
+    else:
+        local_path = os.path.join(os.path.dirname(__file__), "config.json")
+        return local_path
+
+CONFIG_FILE = get_config_path()
 
 DEFAULT_CONFIG = {
     "point_a": None,            # [x, y]
@@ -23,9 +38,10 @@ DEFAULT_CONFIG = {
 
 def load_config() -> Dict[str, Any]:
     """从本地读取配置，如不存在则返回默认配置"""
-    if os.path.exists(CONFIG_FILE):
+    config_path = get_config_path()
+    if os.path.exists(config_path):
         try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            with open(config_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 config = DEFAULT_CONFIG.copy()
                 config.update(data)
@@ -36,9 +52,11 @@ def load_config() -> Dict[str, Any]:
 
 
 def save_config(config: Dict[str, Any]):
-    """保存配置到本地 config.json"""
+    """保存配置到 config.json"""
     try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        config_path = get_config_path()
+        os.makedirs(os.path.dirname(config_path), exist_ok=True)
+        with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2, ensure_ascii=False)
     except Exception as e:
         print(f"保存配置文件失败: {e}")

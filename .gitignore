@@ -6,5 +6,8 @@ __pycache__/
 *.pyd
 .DS_Store
 config.json
+build/
+dist/
+*.spec
 .vscode/
 .idea/
