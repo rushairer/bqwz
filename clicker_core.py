@@ -7,7 +7,6 @@ import os
 from typing import Optional, Tuple, Callable, Dict, Any
 
 from config_manager import load_config, save_config
-from native_input import NativeMouseCapture
 
 try:
     import Quartz
@@ -170,8 +169,6 @@ class AutoClicker:
         
         self._is_running = False
         self._stop_requested = False
-        self._is_capturing = False
-        self._capture_listener: Optional[NativeMouseCapture] = None
         self._exec_thread: Optional[threading.Thread] = None
         self._caffeinate_process: Optional[subprocess.Popen] = None
 
@@ -198,49 +195,6 @@ class AutoClicker:
         }
         save_config(cfg)
 
-    def start_capture(self, on_finish: Optional[Callable[[Tuple[int, int], Tuple[int, int]], None]] = None):
-        """开始屏幕取点流程（原生 AppKit 监视器）"""
-        if self._is_capturing:
-            self.log("⚠️ 正在取点中，请勿重复操作...")
-            return
-
-        self._is_capturing = True
-        captured_points = []
-        self.log("🎯 [取点模式开启] 请在屏幕目标位置点击左键取【A 点】...")
-
-        def on_click(x: int, y: int) -> bool:
-            captured_points.append((x, y))
-            if len(captured_points) == 1:
-                self.point_a = (x, y)
-                win_info = get_window_info_at(x, y)
-                if win_info:
-                    self.target_app_name = win_info['app_name']
-                    self.target_pid = win_info['pid']
-                    self.log(f"✅ 已记录 A 点: {self.point_a} (所属应用: 🏷️ {self.target_app_name})")
-                else:
-                    self.log(f"✅ 已记录 A 点: {self.point_a}")
-                self.log("🎯 请在屏幕下一个目标位置点击左键取【B 点】...")
-                return True  # 继续监听 B 点
-            elif len(captured_points) == 2:
-                self.point_b = (x, y)
-                self.log(f"✅ 已记录 B 点: {self.point_b}")
-                self.log("🎉 A/B 两点采集完毕，配置已自动保存！")
-                self._is_capturing = False
-                self.persist_current_config()
-                if on_finish:
-                    on_finish(self.point_a, self.point_b)
-                return False  # 停止监听
-
-        self._capture_listener = NativeMouseCapture(on_click_callback=on_click)
-        self._capture_listener.start()
-
-    def stop_capture(self):
-        """取消取点"""
-        if self._capture_listener:
-            self._capture_listener.stop()
-        self._is_capturing = False
-        self.log("🛑 已取消取点。")
-
     def _start_caffeinate(self):
         """启动 caffeinate 进程防止系统休眠/锁屏"""
         if self.prevent_sleep and self._caffeinate_process is None:
@@ -265,47 +219,38 @@ class AutoClicker:
             self._caffeinate_process = None
 
     def execute_one_abb_cycle(self) -> bool:
-        """
-        执行一次完整的【原子性 ABB 点击流程】：
-        1. A 点（半径内独立随机）点击 1 次
-        2. 等待 A-B 动态间隔
-        3. B 点第 1 次（半径内独立随机落点 1）点击 1 次
-        4. 等待 B-B 动态间隔
-        5. B 点第 2 次（半径内独立重新随机落点 2）点击 1 次
-        """
+        """执行一次完整的【原子性 ABB 点击流程】"""
         if not self.point_a or not self.point_b:
             self.log("❌ 尚未完成取点，请先设置 A 点和 B 点！")
             return False
 
-        # 锁屏保护检查
         if is_screen_locked():
             return False
 
-        # 如果开启了锁定目标应用，在点击前自动唤醒/聚焦目标应用
         if self.lock_to_target_app and self.target_app_name:
             activate_app(self.target_app_name, self.target_pid)
 
-        # ---------------- 步骤 1: 点击 A 点 ----------------
+        # 1. 点击 A 点
         ax, ay = get_random_offset(self.point_a[0], self.point_a[1], self.radius)
         native_macos_click(ax, ay, count=1)
         self.log(f"👉 [A点] 点击 1 次: 基准 {self.point_a} ➜ 实际落点 ({ax}, {ay})")
 
-        # ---------------- 步骤 2: 等待 A-B 间隔 ----------------
+        # 2. 等待 A-B 间隔
         ab_sec, actual_ab_ms = get_jittered_delay(self.interval_ms, self.interval_jitter_ms)
         self.log(f"⏳ A-B 间隔等待: {actual_ab_ms}ms (基准 {self.interval_ms}ms ± {self.interval_jitter_ms}ms)")
         time.sleep(ab_sec)
 
-        # ---------------- 步骤 3: 点击 B 点第 1 次 ----------------
+        # 3. 点击 B 点第 1 次
         bx1, by1 = get_random_offset(self.point_b[0], self.point_b[1], self.radius)
         native_macos_click(bx1, by1, count=1)
         self.log(f"👉 [B点-1] 点击第 1 次: 基准 {self.point_b} ➜ 独立落点 ({bx1}, {by1})")
 
-        # ---------------- 步骤 4: 等待 B-B 间隔 ----------------
+        # 4. 等待 B-B 间隔
         bb_sec, actual_bb_ms = get_jittered_delay(self.bb_interval_ms, self.bb_interval_jitter_ms)
         self.log(f"⏳ B-B 间隔等待: {actual_bb_ms}ms (基准 {self.bb_interval_ms}ms ± {self.bb_interval_jitter_ms}ms)")
         time.sleep(bb_sec)
 
-        # ---------------- 步骤 5: 点击 B 点第 2 次 ----------------
+        # 5. 点击 B 点第 2 次
         bx2, by2 = get_random_offset(self.point_b[0], self.point_b[1], self.radius)
         retry = 0
         while (bx2, by2) == (bx1, by1) and retry < 5 and self.radius > 0:
@@ -339,7 +284,6 @@ class AutoClicker:
             
             round_idx = 0
             while self._is_running:
-                # 锁屏保护
                 if is_screen_locked():
                     self.log("🛡️ 检测到系统处于锁屏/屏保状态！已自动暂停点击（保护安全）...")
                     while is_screen_locked() and self._is_running:
