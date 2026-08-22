@@ -5,8 +5,9 @@ import threading
 import subprocess
 import os
 from typing import Optional, Tuple, Callable, Dict, Any
-from pynput import mouse
+
 from config_manager import load_config, save_config
+from native_input import NativeMouseCapture
 
 try:
     import Quartz
@@ -140,11 +141,6 @@ def native_macos_click(x: int, y: int, count: int = 1):
             
             if i < count - 1:
                 time.sleep(0.04)
-    else:
-        m = mouse.Controller()
-        m.position = (x, y)
-        time.sleep(0.01)
-        m.click(mouse.Button.left, count)
 
 
 class AutoClicker:
@@ -175,7 +171,7 @@ class AutoClicker:
         self._is_running = False
         self._stop_requested = False
         self._is_capturing = False
-        self._capture_listener: Optional[mouse.Listener] = None
+        self._capture_listener: Optional[NativeMouseCapture] = None
         self._exec_thread: Optional[threading.Thread] = None
         self._caffeinate_process: Optional[subprocess.Popen] = None
 
@@ -203,7 +199,7 @@ class AutoClicker:
         save_config(cfg)
 
     def start_capture(self, on_finish: Optional[Callable[[Tuple[int, int], Tuple[int, int]], None]] = None):
-        """开始屏幕取点流程"""
+        """开始屏幕取点流程（原生 AppKit 监视器）"""
         if self._is_capturing:
             self.log("⚠️ 正在取点中，请勿重复操作...")
             return
@@ -212,38 +208,35 @@ class AutoClicker:
         captured_points = []
         self.log("🎯 [取点模式开启] 请在屏幕目标位置点击左键取【A 点】...")
 
-        def on_click(x, y, button, pressed):
-            if pressed and button == mouse.Button.left:
-                rx, ry = round(x), round(y)
-                captured_points.append((rx, ry))
-                
-                if len(captured_points) == 1:
-                    self.point_a = (rx, ry)
-                    win_info = get_window_info_at(rx, ry)
-                    if win_info:
-                        self.target_app_name = win_info['app_name']
-                        self.target_pid = win_info['pid']
-                        self.log(f"✅ 已记录 A 点: {self.point_a} (所属应用: 🏷️ {self.target_app_name})")
-                    else:
-                        self.log(f"✅ 已记录 A 点: {self.point_a}")
-                    self.log("🎯 请在屏幕下一个目标位置点击左键取【B 点】...")
-                    
-                elif len(captured_points) == 2:
-                    self.point_b = (rx, ry)
-                    self.log(f"✅ 已记录 B 点: {self.point_b}")
-                    self.log("🎉 A/B 两点采集完毕，配置已自动保存！")
-                    self._is_capturing = False
-                    self.persist_current_config()
-                    if on_finish:
-                        on_finish(self.point_a, self.point_b)
-                    return False
+        def on_click(x: int, y: int) -> bool:
+            captured_points.append((x, y))
+            if len(captured_points) == 1:
+                self.point_a = (x, y)
+                win_info = get_window_info_at(x, y)
+                if win_info:
+                    self.target_app_name = win_info['app_name']
+                    self.target_pid = win_info['pid']
+                    self.log(f"✅ 已记录 A 点: {self.point_a} (所属应用: 🏷️ {self.target_app_name})")
+                else:
+                    self.log(f"✅ 已记录 A 点: {self.point_a}")
+                self.log("🎯 请在屏幕下一个目标位置点击左键取【B 点】...")
+                return True  # 继续监听 B 点
+            elif len(captured_points) == 2:
+                self.point_b = (x, y)
+                self.log(f"✅ 已记录 B 点: {self.point_b}")
+                self.log("🎉 A/B 两点采集完毕，配置已自动保存！")
+                self._is_capturing = False
+                self.persist_current_config()
+                if on_finish:
+                    on_finish(self.point_a, self.point_b)
+                return False  # 停止监听
 
-        self._capture_listener = mouse.Listener(on_click=on_click)
+        self._capture_listener = NativeMouseCapture(on_click_callback=on_click)
         self._capture_listener.start()
 
     def stop_capture(self):
         """取消取点"""
-        if self._capture_listener and self._capture_listener.is_alive():
+        if self._capture_listener:
             self._capture_listener.stop()
         self._is_capturing = False
         self.log("🛑 已取消取点。")
@@ -279,8 +272,6 @@ class AutoClicker:
         3. B 点第 1 次（半径内独立随机落点 1）点击 1 次
         4. 等待 B-B 动态间隔
         5. B 点第 2 次（半径内独立重新随机落点 2）点击 1 次
-        
-        ★ 即使中途触发停止，本函数也会完整执行完毕 ABB，确保退出前必定点击过 B 点。
         """
         if not self.point_a or not self.point_b:
             self.log("❌ 尚未完成取点，请先设置 A 点和 B 点！")
@@ -314,9 +305,8 @@ class AutoClicker:
         self.log(f"⏳ B-B 间隔等待: {actual_bb_ms}ms (基准 {self.bb_interval_ms}ms ± {self.bb_interval_jitter_ms}ms)")
         time.sleep(bb_sec)
 
-        # ---------------- 步骤 5: 点击 B 点第 2 次 (重新独立采样落点) ----------------
+        # ---------------- 步骤 5: 点击 B 点第 2 次 ----------------
         bx2, by2 = get_random_offset(self.point_b[0], self.point_b[1], self.radius)
-        # 确保两次随机点极大概率不重合
         retry = 0
         while (bx2, by2) == (bx1, by1) and retry < 5 and self.radius > 0:
             bx2, by2 = get_random_offset(self.point_b[0], self.point_b[1], self.radius)
@@ -366,17 +356,14 @@ class AutoClicker:
                 if self.infinite_loop or self.loops > 1:
                     self.log(f"--- 第 {round_idx} 轮 (ABB 周期) ---")
 
-                # 执行一次完整的 ABB 周期
                 success = self.execute_one_abb_cycle()
                 if not success and not is_screen_locked():
                     break
 
-                # 检查是否请求了停止
                 if self._stop_requested:
                     self.log("🛑 已完成当前轮次完整的 ABB 点击，安全退出！")
                     break
 
-                # 轮次间微小缓冲
                 if self._is_running:
                     if self.infinite_loop or round_idx < self.loops:
                         time.sleep(0.3)
@@ -392,7 +379,7 @@ class AutoClicker:
         self._exec_thread.start()
 
     def stop_execution(self):
-        """优雅停止：等待当前正在执行的 ABB 周期完成后退出"""
+        """优雅停止"""
         if self._is_running and not self._stop_requested:
             self._stop_requested = True
             self.log("⏳ 收到停止指令：将在完成当前完整的一轮 ABB 点击后安全停止...")

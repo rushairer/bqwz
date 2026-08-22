@@ -5,9 +5,9 @@ import time
 from typing import Optional
 
 import customtkinter as ctk
-from pynput import keyboard
 
 from clicker_core import AutoClicker, check_accessibility_permission, is_screen_locked
+from native_input import NativeHotkeyManager
 
 # 设置 CustomTkinter 外观
 ctk.set_appearance_mode("System")  # 跟随系统深色/浅色模式
@@ -28,7 +28,7 @@ class ModernClickerApp(ctk.CTk):
         self.clicker = AutoClicker(log_callback=self._append_log)
 
         self._create_widgets()
-        self._setup_global_hotkeys()
+        self._setup_hotkeys()
         self._check_permission_status()
         self._load_initial_values()
 
@@ -444,21 +444,18 @@ class ModernClickerApp(ctk.CTk):
         except ValueError:
             pass
 
-    def _setup_global_hotkeys(self):
-        def on_press(key):
-            try:
-                if key == keyboard.Key.f8:
-                    self.after(0, self.on_btn_capture)
-                elif key == keyboard.Key.f9:
-                    self.after(0, self.on_btn_run)
-                elif key == keyboard.Key.esc:
-                    self.after(0, self.on_btn_stop)
-            except Exception:
-                pass
-
-        self.kb_listener = keyboard.Listener(on_press=on_press)
-        self.kb_listener.daemon = True
-        self.kb_listener.start()
+    def _setup_hotkeys(self):
+        # 1. macOS 原生 AppKit 全局热键监视器 (线程安全，彻底杜绝崩溃)
+        self.hotkey_mgr = NativeHotkeyManager(
+            on_f8=lambda: self.after(0, self.on_btn_capture),
+            on_f9=lambda: self.after(0, self.on_btn_run),
+            on_esc=lambda: self.after(0, self.on_btn_stop)
+        )
+        
+        # 2. Tkinter 窗口内本地按键绑定双重保险
+        self.bind_all("<F8>", lambda e: self.on_btn_capture())
+        self.bind_all("<F9>", lambda e: self.on_btn_run())
+        self.bind_all("<Escape>", lambda e: self.on_btn_stop())
 
     def on_btn_capture(self):
         self.btn_capture.configure(text="🎯 正在取点中...", state="disabled")
