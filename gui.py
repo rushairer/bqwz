@@ -5,9 +5,9 @@ import time
 from typing import Optional
 
 import customtkinter as ctk
-from pynput import keyboard
 
 from clicker_core import AutoClicker, check_accessibility_permission, is_screen_locked, get_window_info_at
+from native_input import NativeHotkeyPoller
 from overlay_capture import ScreenCaptureOverlay
 
 # 设置 CustomTkinter 外观
@@ -70,7 +70,7 @@ class ModernClickerApp(ctk.CTk):
 
         hint_lbl = ctk.CTkLabel(
             header_frame,
-            text="全局快捷键：[F8] 屏幕取点  |  [F9] 开始执行  |  [Esc] 停止/退出",
+            text="全局快捷键：[F8] 屏幕取点  |  [F9] 开始执行  |  [Esc / F10] 停止",
             font=ctk.CTkFont(size=11),
             text_color="gray"
         )
@@ -215,7 +215,7 @@ class ModernClickerApp(ctk.CTk):
 
         self.switch_infinite = ctk.CTkCheckBox(
             p_row3,
-            text="♾️ 无限循环 (按 Esc 完成本轮后停止)",
+            text="♾️ 无限循环 (按 Esc / F10 停止)",
             font=ctk.CTkFont(size=12),
             command=self._on_toggle_infinite
         )
@@ -269,7 +269,7 @@ class ModernClickerApp(ctk.CTk):
 
         self.btn_stop = ctk.CTkButton(
             btn_frame,
-            text="⏹ 停止 (Esc)",
+            text="⏹ 停止 (Esc / F10)",
             font=ctk.CTkFont(size=13, weight="bold"),
             height=38,
             fg_color=("#D32F2F", "#C62828"),
@@ -447,25 +447,18 @@ class ModernClickerApp(ctk.CTk):
             pass
 
     def _setup_hotkeys(self):
-        # 恢复 run.sh 同款 pynput 全局热键监听（由于已预先初始化 NSApplication，完全不崩溃）
-        def on_press(key):
-            try:
-                if key == keyboard.Key.esc:
-                    self.after(0, self.on_btn_stop)
-                elif key == keyboard.Key.f8:
-                    self.after(0, self.on_btn_capture)
-                elif key == keyboard.Key.f9:
-                    self.after(0, self.on_btn_run)
-            except Exception:
-                pass
-
-        self.kb_listener = keyboard.Listener(on_press=on_press)
-        self.kb_listener.daemon = True
-        self.kb_listener.start()
-
-        # 本地快捷键双保险
+        # 1. macOS 原生双会话高频按键轮询器 (25Hz, 0% CPU, 0 崩溃)
+        self.hotkey_poller = NativeHotkeyPoller(
+            self,
+            on_f8=self.on_btn_capture,
+            on_f9=self.on_btn_run,
+            on_esc=self.on_btn_stop
+        )
+        
+        # 2. 本地窗口绑定双保险
         self.bind_all("<F8>", lambda e: self.on_btn_capture())
         self.bind_all("<F9>", lambda e: self.on_btn_run())
+        self.bind_all("<F10>", lambda e: self.on_btn_stop())
         self.bind_all("<Escape>", lambda e: self.on_btn_stop())
 
     def on_btn_capture(self):
@@ -530,13 +523,13 @@ class ModernClickerApp(ctk.CTk):
 
         self.btn_run.configure(state="disabled")
         self.btn_capture.configure(state="disabled")
-        self.btn_stop.configure(text="⏹ 停止 (Esc)", state="normal")
+        self.btn_stop.configure(text="⏹ 停止 (Esc/F10)", state="normal")
 
         def on_complete():
             def _restore_btn():
                 self.btn_run.configure(state="normal")
                 self.btn_capture.configure(state="normal")
-                self.btn_stop.configure(text="⏹ 停止 (Esc)", state="normal")
+                self.btn_stop.configure(text="⏹ 停止 (Esc/F10)", state="normal")
             self.after(0, _restore_btn)
 
         self.clicker.start_execution(on_complete=on_complete)

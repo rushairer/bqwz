@@ -1,13 +1,6 @@
 import sys
 import argparse
 
-# 在 macOS GUI 模式下，预先初始化 NSApplication，确保 pynput 后台线程调用 Carbon/HIToolbox 时不触发主队列断言
-try:
-    import AppKit
-    AppKit.NSApplication.sharedApplication()
-except Exception:
-    pass
-
 
 def main():
     parser = argparse.ArgumentParser(description="macOS 屏幕自动点击工具")

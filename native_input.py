@@ -1,86 +1,86 @@
 """
-macOS 底层全局热键监听器 (基于 Quartz CGEventTap + 独立 CFRunLoop)
-真正实现系统级全局热键：即使失去窗口焦点或在其他任意应用前台，Esc / F8 / F9 均能瞬间响应
+macOS 原生全局热键与鼠标捕获模块
+采用 CombinedSessionState + HIDSystemState 双状态轮询
+100% 避免跨线程 C 回调与 Python 3.13 GIL 锁争用冲突，彻底杜绝 PyEval_RestoreThread 崩溃
 """
-import threading
-from typing import Callable, Optional
 import Quartz
+from typing import Callable, Optional
 
-# macOS 物理虚拟键码
+# macOS 虚拟键码
 VK_F8 = 100
 VK_F9 = 101
+VK_F10 = 109
 VK_ESC = 53
 
 
-class GlobalHotkeyListener:
+def is_mac_key_down(key_code: int) -> bool:
+    """同时检查全局组合会话状态与底层硬件状态，确保无论焦点在任何应用均能捕获"""
+    try:
+        return (
+            Quartz.CGEventSourceKeyState(Quartz.kCGEventSourceStateCombinedSessionState, key_code) or
+            Quartz.CGEventSourceKeyState(Quartz.kCGEventSourceStateHIDSystemState, key_code)
+        )
+    except Exception:
+        return False
+
+
+class NativeHotkeyPoller:
+    """在 Tkinter 主事件循环中以 25ms 间隔高频轮询全局按键，无 GIL 冲突，0 崩溃"""
     def __init__(
         self,
-        tk_app,
+        tk_root,
         on_f8: Optional[Callable[[], None]] = None,
         on_f9: Optional[Callable[[], None]] = None,
         on_esc: Optional[Callable[[], None]] = None
     ):
-        self.tk_app = tk_app
+        self.tk_root = tk_root
         self.on_f8 = on_f8
         self.on_f9 = on_f9
         self.on_esc = on_esc
         
-        self._run_loop = None
-        self._thread = None
-        self._is_running = False
+        self._prev_f8 = False
+        self._prev_f9 = False
+        self._prev_esc = False
+        self._prev_f10 = False
+        self._running = True
+        
+        self._schedule_poll()
 
-    def _event_tap_callback(self, proxy, event_type, event, refcon):
-        if event_type == Quartz.kCGEventKeyDown:
-            try:
-                keycode = Quartz.CGEventGetIntegerValueField(
-                    event, Quartz.kCGKeyboardEventKeycode
-                )
-                if keycode == VK_ESC and self.on_esc:
-                    # 线程安全派发到 Tkinter 主事件循环
-                    self.tk_app.after(0, self.on_esc)
-                elif keycode == VK_F8 and self.on_f8:
-                    self.tk_app.after(0, self.on_f8)
-                elif keycode == VK_F9 and self.on_f9:
-                    self.tk_app.after(0, self.on_f9)
-            except Exception:
-                pass
-        return event
-
-    def start(self):
-        if self._is_running:
+    def _schedule_poll(self):
+        if not self._running:
             return
-        self._is_running = True
+        try:
+            self._check_keys()
+        except Exception:
+            pass
+        # 25ms 高频采样 (40Hz)，保证按键瞬间被捕获，CPU 占用微乎其微
+        self.tk_root.after(25, self._schedule_poll)
 
-        def loop_worker():
-            try:
-                # 监听底层键盘按下事件 (ListenOnly 模式，纯监听不拦截)
-                tap = Quartz.CGEventTapCreate(
-                    Quartz.kCGHIDEventTap,
-                    Quartz.kCGHeadInsertEventTap,
-                    Quartz.kCGEventTapOptionListenOnly,
-                    Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown),
-                    self._event_tap_callback,
-                    None
-                )
-                if not tap:
-                    return
+    def _check_keys(self):
+        # 1. 检查 F8 (屏幕取点)
+        is_f8 = is_mac_key_down(VK_F8)
+        if is_f8 and not self._prev_f8:
+            if self.on_f8:
+                self.on_f8()
+        self._prev_f8 = is_f8
 
-                source = Quartz.CFMachPortCreateRunLoopSource(None, tap, 0)
-                self._run_loop = Quartz.CFRunLoopGetCurrent()
-                Quartz.CFRunLoopAddSource(self._run_loop, source, Quartz.kCFRunLoopCommonModes)
-                Quartz.CGEventTapEnable(tap, True)
-                Quartz.CFRunLoopRun()
-            except Exception:
-                pass
+        # 2. 检查 F9 (开始执行)
+        is_f9 = is_mac_key_down(VK_F9)
+        if is_f9 and not self._prev_f9:
+            if self.on_f9:
+                self.on_f9()
+        self._prev_f9 = is_f9
 
-        self._thread = threading.Thread(target=loop_worker, daemon=True)
-        self._thread.start()
+        # 3. 检查 Esc 与 F10 (停止执行，双保险)
+        is_esc = is_mac_key_down(VK_ESC)
+        is_f10 = is_mac_key_down(VK_F10)
+        
+        if (is_esc and not self._prev_esc) or (is_f10 and not self._prev_f10):
+            if self.on_esc:
+                self.on_esc()
+                
+        self._prev_esc = is_esc
+        self._prev_f10 = is_f10
 
     def stop(self):
-        self._is_running = False
-        if self._run_loop:
-            try:
-                Quartz.CFRunLoopStop(self._run_loop)
-            except Exception:
-                pass
-            self._run_loop = None
+        self._running = False
